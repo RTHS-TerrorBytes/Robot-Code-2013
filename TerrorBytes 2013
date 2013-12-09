@@ -1,0 +1,496 @@
+# Plug Joystick 1 into xxxx
+# Plug Joystick 2 into xxxx
+# Victor Motor 1 connected to xxxx
+# Victor Motor 2 connected to xxxx
+# Compressor connected to xxxx
+
+import os,sys # import some really common stuff
+import wpilib
+
+from gamepad import TwoStickGamepad # our code!
+
+# >>>> Choose what input devices we're using and how they're being used <<<<
+#
+control_mode = "two-stick-tank"  # normal two-joystick tank drive
+#control_mode = "gamepad-tank"    # tank drive using the two thumb sticks of a gamepad
+#control_mode = "gamepad-curve"   # "curve" drive on gamepad: left stick is speed and right stick is turn
+
+leftMotorMultiplier = 1.0
+rightMotorMultiplier = 0.98
+
+# when in_touring_mode() is true, limit motors to this output (to let strangers drive more safely)
+TOURING_LIMIT = 0.7
+
+print("** Starting initalization **")
+
+# major robot widgets
+
+dstation = wpilib.DriverStation.GetInstance()
+
+if control_mode == "two-stick-tank":
+	lstick = wpilib.Joystick(1)
+	rstick = wpilib.Joystick(2)
+elif control_mode == 'gamepad-tank' or control_mode == 'gamepad-curve':
+	gamepad = TwoStickGamepad(1)
+
+lmotor = wpilib.Victor(1)
+rmotor = wpilib.Victor(2)
+
+drive = wpilib.RobotDrive(lmotor, rmotor)
+# RobotDrive has an internal safety helper (type MotorSafetyHelper).
+# Disable this for now.  If enabled, the drive has a safety timer
+# similar to the watchdog.
+drive.SetSafetyEnabled(False)
+
+#use this code to reverse the motors
+#drive.SetInvertedMotor(0, True)
+#drive.SetInvertedMotor(1, True)
+#drive.SetInvertedMotor(2, True)
+#drive.SetInvertedMotor(3, True)
+
+#compressor1 = wpilib.Compressor(1,1) # DIO port 1, Relay port 1
+#compressor1.Start()
+#compressor_test = wpilib.Relay(1)
+
+extendForwardPiston = wpilib.Solenoid(1) #Port can change
+retractForwardPiston = wpilib.Solenoid(2) 
+extendRightPiston = wpilib.Solenoid(3) 
+retractRightPiston = wpilib.Solenoid(4) 
+liftPistonUp = wpilib.Solenoid(5)
+liftPistonDown = wpilib.Solenoid(6)
+# up and down solenoids replaced by relay
+#liftPiston.Set parameters { kOff, kOn, kForward, kReverse }
+#liftPiston = wpilib.Relay(2) # Relay port 2
+
+clock = wpilib.Timer()
+clock.Start()
+def now(): return clock.Get()
+
+def stickGetRawButton(b):
+	if control_mode == "two-stick-tank":
+		return lstick.GetRawButton(b)
+	elif control_mode == 'gamepad-tank' or control_mode == 'gamepad-curve':
+		return gamepad.GetRawButton(b)
+
+def stickGetLeftX():
+	if control_mode == "two-stick-tank":
+		return lstick.GetX()
+	elif control_mode == 'gamepad-tank' or control_mode == 'gamepad-curve':
+		return gamepad.GetLeftX()
+	
+def stickGetLeftY():
+	if control_mode == "two-stick-tank":
+		return lstick.GetY()
+	elif control_mode == 'gamepad-tank' or control_mode == 'gamepad-curve':
+		return gamepad.GetLeftY()
+	
+def stickGetRightX():
+	if control_mode == "two-stick-tank":
+		return rstick.GetX()
+	elif control_mode == 'gamepad-tank' or control_mode == 'gamepad-curve':
+		return gamepad.GetRightX()
+	
+def stickGetRightY():
+	if control_mode == "two-stick-tank":
+		return rstick.GetY()
+	elif control_mode == 'gamepad-tank' or control_mode == 'gamepad-curve':
+		return gamepad.GetRightY()
+	
+
+# monostable encapulates a single joystick and a single button #...
+class MonoStable:
+	def __init__(self, stick, button):
+		self.button = button
+		self.stick = stick
+		self.readyToFire = True
+	def isPressed(self):
+		if self.stick.GetRawButton(self.button):
+			if self.readyToFire == True:
+				self.readyToFire = False
+				return True 
+		else:
+			self.readyToFire = True
+		return False
+
+def run_ripshell():
+	print("Launching ripshell!!  Robot will be non-responsive until it is exited.")
+	print("To use ripshell, on the computer's command prompt, do:")
+	print('  cd "C:\Documents and Settings\RTHS\My Documents\Google Drive\ProgramTeam\ROBOT_CODE"')
+	print('  python ripshell.py 10.45.61.2')
+	print("""To exit ripshell and resume robot duties, type 'raise SystemExit("quit")'""")
+	import ripshell
+	ripshell.RIPServer( ripshell.config )
+
+def run_ripshell_background():
+	import threading
+	class RipshellBackground(threading.Thread):
+		def run(self):
+			run_ripshell()
+	RipshellBackground().start()
+
+	
+def in_touring_mode():
+	return not dstation.GetDigitalIn(5) and not dstation.GetDigitalIn(6)
+def in_debug_mode():
+	return not dstation.GetDigitalIn(7) and not dstation.GetDigitalIn(8)
+	
+class PulserLine(object):
+	def __init__(self,max=20):
+		self.n = 0
+		self.max = max
+	def get_line(self):
+		self.n += 1
+		if self.n>self.max: 
+			self.n = 0
+		return (" "*self.n) + "*"
+		
+	
+	
+class MyRobot(wpilib.SimpleRobot):
+	def __init__(self):
+		super(MyRobot,self).__init__()
+		#print("COMPRESSOR CODE DISABLED")
+		self.compressor1 = wpilib.Compressor(1,1) # DIO port 1, Relay port 1
+		self.compressor1.Start()
+		print("Compressor initalized: %s" % self.compressor1)
+		
+		self.dog = self.GetWatchdog()
+		self.dog.SetEnabled(True)
+		self.dog.SetExpiration(0.25)
+		
+		self.lcd_pulser = PulserLine()
+		
+	def UpdateLCD(self,msg=""):
+		lcd = wpilib.DriverStationLCD.GetInstance()
+		
+		# blank the LCD before we write stuff to it
+		for line in range(6):
+			lcd.PrintLine(line," "*20)
+
+		# actually write lines to LCD
+		lcd.PrintLine(0,"%.2f,%.2f %.2f,%.2f" % (stickGetLeftX(), stickGetLeftY(), stickGetRightX(), stickGetRightY()))
+		
+		dstation_inputs = ''
+		for i in range(1,9):
+			if dstation.GetDigitalIn(i):
+				dstation_inputs += '1'
+			else:
+				dstation_inputs += '0'
+		lcd.PrintLine(1,"DS-In: %s" % dstation_inputs)
+		
+		lcd.PrintLine(2,"C: %s" % control_mode)
+		
+		if in_touring_mode() and in_debug_mode():
+			lcd.PrintLine(3,"-- TOURING+DEBUG! --")
+		elif in_touring_mode():
+			lcd.PrintLine(3,"-- TOURING MODE! --")
+		elif in_debug_mode():
+			lcd.PrintLine(3,"-- DEBUG MODE! --")
+			
+		lcd.PrintLine(4,self.lcd_pulser.get_line())
+			
+		lcd.PrintLine(5,msg)
+		
+		# actually update the LCD display
+		lcd.UpdateLCD()
+
+	def Disabled(self):
+		while self.IsDisabled():
+			self.UpdateLCD("Disabled.")
+			wpilib.Wait(0.05)
+			
+	# robot operations
+	
+	def Delay(self, waitTime):
+		timer = wpilib.Timer()
+		timer.Start()
+
+		i = 0  
+		startTime = timer.Get()
+		
+		nextWait = 0.0
+		
+		while self.IsEnabled() and ((timer.Get() - startTime) < waitTime):
+			self.dog.Feed()
+				
+			i += 1
+			currentTime = timer.Get()
+			elapsedTime = currentTime - startTime
+			if i%30 == 0:
+				print("Delay: %f, %f" % (currentTime, elapsedTime))
+			
+			remainingTime = waitTime - elapsedTime
+			if remainingTime > 0.04:
+				nextWait = 0.04
+			elif remainingTime < 0.0:
+				nextWait = 0.0
+			else:
+				nextWait = remainingTime
+				
+			#print("Delay(%.2f): Waiting snippet %.3f" % (waitTime,nextWait))
+			wpilib.Wait(nextWait) # Make sure this time much smaller than and a divisor of the time windows!
+			
+	def Move(self, driveTime, driveSpeed):
+		print("Move: %f, %f" % (driveTime, driveSpeed))
+		drive.Drive(driveSpeed, 0.0)
+		self.Delay(driveTime)
+		drive.Drive(0.0, 0.0)
+		print("Move complete.")
+	
+	# Speed in fraction of max motor speed
+	# Distance in feet
+	def MoveDistance (self, speed, distance):
+		slope = 8.5 #Robot speed at max motor speed
+		yIntercept = 4
+		time = (distance - yIntercept) / slope
+		self.Move(time, speed)
+		
+	# Speed in fraction of max motor speed
+	# Angle in degrees
+	def TurnAngle (self, speed, angle): 
+		slope = 900 #90 degrees in 0.1 seconds
+		yIntercept = 0 
+		time = (angle - yIntercept) / slope
+		self.Turn(time, speed, "right") #Positive angle is to the right
+		
+	def Turn(self, driveTime, driveSpeed, direction):
+		if (direction.lower() == "left"):
+			curve = -1.0
+		else:
+			curve = 1.0
+		print("Turn: %f, %f" % (driveTime, driveSpeed))
+		drive.Drive(driveSpeed, curve)
+		self.Delay(driveTime)
+		drive.Drive(0.0, 0.0)
+		print("Turn complete.")
+	
+	# launcher functions
+	
+	def RaiseLauncher(self):
+		print("RaiseLaucher.")
+		self.dog.Feed()
+		liftPistonDown.Set(False)
+		liftPistonUp.Set(True)
+		self.Delay(0.6)
+		print("RaiseLauncher done.")
+		
+	def LowerLauncher(self):
+		print("LowerLauncher.")
+		self.dog.Feed()
+		liftPistonUp.Set(False)
+		liftPistonDown.Set(True)
+		self.Delay(0.4)	
+		print("LowerLauncher done.")
+		
+	def ForwardDiskLaunch(self):
+		print("ForwardDiskLaunch.")
+		self.dog.Feed()
+		extendForwardPiston.Set(True)
+		self.Delay(0.45)
+		extendForwardPiston.Set(False)
+		self.dog.Feed()
+		retractForwardPiston.Set(True)
+		self.Delay(0.45)
+		retractForwardPiston.Set(False)
+		print("ForwardDiskLaunch done.")
+		
+	def RightDiskLaunch(self):
+		print("RightDiskLaunch.")
+		self.dog.Feed()
+		extendRightPiston.Set(True)
+		self.Delay(0.45)
+		extendRightPiston.Set(False)
+		self.dog.Feed()
+		retractRightPiston.Set(True)
+		self.Delay(0.45)
+		retractRightPiston.Set(False)
+		print("RightDiskLaunch done.")
+		
+	def RaiseAndRightLaunch(self):
+		print("RaiseAndRightLaunch.")
+		self.RaiseLauncher()
+		self.RightDiskLaunch()
+		self.LowerLauncher()
+		print("RaiseAndRightLaunch done.")
+
+	# autonomous modes
+	
+	def AutoDoNothing(self):
+		print("do nothing, I say!")
+	
+	def AutoRightShot(self):
+		print("AutoRightShot")
+		self.Move(0.5,0.75)
+		self.Turn(1.0,0.5,"right")
+		self.Move(2.0,-0.75)
+		self.ForwardDiskLaunch()
+		print("AutoRightShot complete.")
+		
+	def AutoForwardShot(self):
+		print("AutoForwardShot")
+		self.Move(1.5, 0.5)
+		self.RaiseAndRightLaunch()
+		print("AutoForwardShot complete")
+		
+	def AutoForwardsBackwards(self):
+		print("AutoForwardsBackwards")
+		
+		#what it used to look like
+		#self.GetWatchdog().SetEnabled(False)
+
+		# keep track of how much time has passed in autonomous mode
+		timer = wpilib.Timer()
+		timer.Start()
+
+		i = 0  
+		
+		while self.IsAutonomous() and self.IsEnabled():
+			self.dog.Feed()
+			
+			currentTime = timer.Get()
+			
+			if (currentTime >= 0) and (currentTime < 3): # In the time window [0, 3) move forward.
+				#lmotor.Set(-0.2)
+				#rmotor.Set(0.2)
+				drive.Drive(0.5, 0.0)
+			elif (currentTime >= 3) and (currentTime < 6): # In the time window [3, 6) move backwards.
+				#lmotor.Set(0.2)
+				#rmotor.Set(-0.2)
+				drive.Drive(-0.5, 0.0)
+			else: # Any other times (-inf, 0.0) [6, +inf), don't move at all.
+				#lmotor.Set(0)
+				#rmotor.Set(0)
+				drive.Drive(0.0, 0.0)
+				
+			i += 1
+			if i%30 == 0:
+				print("%f" % currentTime)
+			
+			wpilib.Wait(0.04) # Make sure this time much smaller than and a divisor of the time windows!
+		print("AutoForwardsBackwards complete.")
+	
+	#Robot at front right corner
+	#Alex's
+	def AutoPlanA(self):
+		print("Pass PlanA")
+		
+	#Robot at back right corner
+	#Front right corner is blocked
+	#Zack's
+	def AutoPlanB(self):
+		print("Pass PlanB")
+		
+	#Robot at front left corner
+	#Myles'
+	def AutoPlanC(self):
+		self.MoveDistance(1.0, 22)
+		self.TurnAngle(1.0, 90)
+		self.MoveDistance(1.0, 94)
+		self.TurnAngle(1.0, -31)
+		self.MoveDistance(1.0, 102)
+		self.ForwardDiskLaunch()
+		
+	def Autonomous(self):
+		self.UpdateLCD("Auto start.")
+		
+		# turn off DI 1-3 for debug shell
+		if not dstation.GetDigitalIn(1) and not dstation.GetDigitalIn(2):
+			if not dstation.GetDigitalIn(3):
+				run_ripshell_background()
+			else:
+				run_ripshell()
+			return
+		
+		#disable autonomous modes entirely
+		self.AutoDoNothing()
+		return
+		
+		
+		if not dstation.GetDigitalIn(1):
+			self.AutoForwardsBackwards()
+		elif not dstation.GetDigitalIn(2):
+			self.AutoForwardShot()
+		elif not dstation.GetDigitalIn(3):
+			self.AutoRightShot()
+		elif not dstation.GetDigitalIn(4):
+			self.Move(1.0, 1.0)
+		elif not dstation.GetDigitalIn(5):
+			self.Move(2.0, 1.0)
+		elif not dstation.GetDigitalIn(6):
+			self.Move(1.0, 0.5)
+		elif not dstation.GetDigitalIn(7):
+			self.Move(2.0, 0.5)
+		elif not dstation.GetDigitalIn(8):
+			pass # do nothing
+		else:
+			self.AutoDoNothing()
+
+	# operator control
+	
+	def OperatorControl(self):
+		# Timer tick; don't display debug output on each control loop.
+		tick=0
+		
+		# Used to limit a button press to a single launch;
+		# Don't spam disk launches when the button is held down.
+		if control_mode == "two-stick-tank":
+			fwd_launch_button = MonoStable(lstick,4)
+			right_launch_button = MonoStable(rstick,5)
+			raise_launcher_button = MonoStable(rstick,11)
+			lower_launcher_button = MonoStable(rstick,10)
+		elif control_mode == 'gamepad-tank' or control_mode == 'gamepad-curve':
+			fwd_launch_button = MonoStable(gamepad,5)
+			right_launch_button = MonoStable(gamepad,6)
+			raise_launcher_button = MonoStable(gamepad,4)
+			lower_launcher_button = MonoStable(gamepad,2)
+		
+		while self.IsOperatorControl() and self.IsEnabled():
+			self.dog.Feed()
+
+			touring_adjustment = 1.0
+			if in_touring_mode():
+				touring_adjustment = TOURING_LIMIT
+				
+			if control_mode == 'two-stick-tank' or control_mode == 'gamepad-tank':
+				drive.TankDrive(-leftMotorMultiplier*touring_adjustment*stickGetLeftY(), -rightMotorMultiplier*touring_adjustment*stickGetRightY())
+			elif control_mode == 'gamepad-curve':
+				drive.Drive(touring_adjustment*-stickGetLeftY(), stickGetRightX())
+			
+			#Debug mode: To activate turn off digital inputs 7 and 8
+			#This is manual commands for every function of the robot
+			if in_debug_mode():
+				extendForwardPiston.Set(stickGetRawButton(1))
+				retractForwardPiston.Set(stickGetRawButton(2))
+				extendRightPiston.Set(stickGetRawButton(3))
+				retractRightPiston.Set(stickGetRawButton(4))
+				liftPistonUp.Set(stickGetRawButton(5))
+				liftPistonDown.Set(stickGetRawButton(6))
+
+				wpilib.Wait(0.04)
+			else:
+
+				if fwd_launch_button.isPressed():
+					self.ForwardDiskLaunch()
+					
+				if right_launch_button.isPressed():
+					self.RaiseAndRightLaunch()
+					
+				if raise_launcher_button.isPressed():
+					self.RaiseLauncher()
+					
+				if lower_launcher_button.isPressed():
+					self.LowerLauncher()
+
+			tick += 1
+			
+			self.UpdateLCD("Tele tick=%d" % tick)
+			if tick%30==0:
+				print("ls=(%f,%f) rs=(%f,%f)" % (stickGetLeftX(), stickGetLeftY(), stickGetRightX(), stickGetRightY()))
+
+			wpilib.Wait(0.04)
+
+def run():
+	robot = MyRobot()
+	print("*** TEAM TERRORBYTE ROBOT CODE STARTED! ***")
+	robot.StartCompetition()
+	return robot
